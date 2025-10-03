@@ -6,6 +6,15 @@ provider "aws" {
 }
 
 # -----------------------------
+# Random Suffix (for unique names)
+# -----------------------------
+resource "random_string" "suffix" {
+  length  = 8
+  special = false
+  upper   = false
+}
+
+# -----------------------------
 # S3 Bucket (with unique name)
 # -----------------------------
 resource "aws_s3_bucket" "trigger_bucket" {
@@ -20,17 +29,30 @@ resource "aws_s3_bucket" "trigger_bucket" {
   }
 }
 
-resource "random_string" "suffix" {
-  length  = 8
-  special = false
-  upper   = false
+# -----------------------------
+# DynamoDB Table
+# -----------------------------
+resource "aws_dynamodb_table" "file_metadata" {
+  name         = "FileMetadata"
+  billing_mode = "PAY_PER_REQUEST"  # No need to manage read/write capacity
+
+  hash_key     = "file_id"  # Primary key (partition key)
+
+  attribute {
+    name = "file_id"
+    type = "S"  # S = String
+  }
+
+  tags = {
+    Name = "FileMetadataTable"
+  }
 }
 
 # -----------------------------
 # IAM Role for Lambda
 # -----------------------------
 resource "aws_iam_role" "lambda_exec_role" {
-  name = "s3-lambda-exec-role"
+  name = "s3-lambda-dynamodb-role"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -50,10 +72,38 @@ resource "aws_iam_role" "lambda_exec_role" {
   }
 }
 
-# Attach basic Lambda logging policy
-resource "aws_iam_role_policy_attachment" "lambda_basic_execution" {
-  role       = aws_iam_role.lambda_exec_role.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+# -----------------------------
+# Custom IAM Policy for Lambda (DynamoDB + Logging)
+# -----------------------------
+resource "aws_iam_role_policy" "lambda_dynamodb_policy" {
+  name = "lambda-dynamodb-access"
+  role = aws_iam_role.lambda_exec_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      # Allow CloudWatch logging
+      {
+        Effect = "Allow",
+        Action = [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ],
+        Resource = "*"
+      },
+      # Allow writing to DynamoDB table
+      {
+        Effect = "Allow",
+        Action = [
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:GetItem"
+        ],
+        Resource = aws_dynamodb_table.file_metadata.arn
+      }
+    ]
+  })
 }
 
 # -----------------------------
@@ -74,7 +124,7 @@ resource "aws_lambda_function" "s3_processor" {
     Environment = "dev"
   }
 
-  depends_on = [aws_iam_role_policy_attachment.lambda_basic_execution]
+  depends_on = [aws_iam_role_policy.lambda_dynamodb_policy]
 }
 
 # -----------------------------
@@ -97,11 +147,10 @@ resource "aws_s3_bucket_notification" "bucket_notification" {
   lambda_function {
     lambda_function_arn = aws_lambda_function.s3_processor.arn
     events              = ["s3:ObjectCreated:*"]
-    # Optional: filter by prefix/suffix
-    # filter_suffix = ".jpg"
+    # Optional: filter by file type
+    # filter_suffix = ".pdf"
   }
 
-  # Critical: Ensure Lambda permission is created BEFORE notification
   depends_on = [
     aws_lambda_permission.allow_s3_invoke,
     aws_lambda_function.s3_processor
