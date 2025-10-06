@@ -4,6 +4,14 @@ provider "aws" {
   region = var.aws_region
 }
 
+# Random suffix for bucket uniqueness
+resource "random_string" "suffix" {
+  length  = 8
+  special = false
+  upper   = false
+  numeric = true
+}
+
 # S3 Bucket (auto-generated unique name)
 resource "aws_s3_bucket" "trigger_bucket" {
   bucket = "${var.bucket_name_prefix}-${var.environment}-${random_string.suffix.result}"
@@ -96,12 +104,14 @@ resource "aws_iam_role_policy" "lambda_policy" {
   })
 }
 
-# Random suffix for bucket uniqueness
-resource "random_string" "suffix" {
-  length  = 8
-  special = false
-  upper   = false
-  numeric = true
+# 🔥 CloudWatch Log Group (pre-created to avoid permission issues)
+resource "aws_cloudwatch_log_group" "lambda_logs" {
+  name              = "/aws/lambda/${var.lambda_function_name}"
+  retention_in_days = 30
+
+  tags = {
+    Environment = var.environment
+  }
 }
 
 # Lambda Function
@@ -126,7 +136,11 @@ resource "aws_lambda_function" "s3_processor" {
     Environment = var.environment
   }
 
-  depends_on = [aws_iam_role_policy.lambda_policy]
+  # Ensure log group and IAM policy exist before Lambda
+  depends_on = [
+    aws_iam_role_policy.lambda_policy,
+    aws_cloudwatch_log_group.lambda_logs
+  ]
 }
 
 # Allow S3 to invoke Lambda
